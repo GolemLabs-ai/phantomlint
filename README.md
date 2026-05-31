@@ -163,17 +163,36 @@ repos:
 
 Catches phantom features before they get committed, not after they ship.
 
+## Supported stacks (v0.1.1)
+
+`phantomlint` works on three layers expressed as **plain text**: a frontend that calls endpoints with `fetch()`/`axios`, a backend that mounts routes, and a database whose schema is defined in raw SQL `CREATE TABLE` statements.
+
+**Routing patterns parsed in v0.1.1:**
+
+- Hand-rolled JS/TS dispatch: `path === '/route'`, `path.startsWith('/route')`, `path.match(/regex/)`
+- **Express Router**: `router.get|post|put|patch|delete|all('/route', handler)` (also `app.get|...`)
+
+**Schema layer:**
+
+- Raw SQL `CREATE TABLE` migrations (Postgres / MySQL / SQLite dialects)
+
+Ground-truth on three public OSS repos (v0.1.1):
+
+| Stack | Result |
+|---|---|
+| React + Express + raw SQL ([vandenn/fullstack-react-blog](https://github.com/vandenn/fullstack-react-blog)) | 10 routes extracted, 14 columns checked, 1 baseline-acceptable FP from `ON CONFLICT DO UPDATE SET` UPSERT |
+| Next.js + Prisma ([prisma/fullstack-prisma-nextjs-blog](https://github.com/prisma/fullstack-prisma-nextjs-blog)) | 0 BLOCK findings (import statements no longer trip the SQL `FROM` regex). Schema layer silent (Prisma DSL not parsed - see roadmap). |
+| Django + DRF ([vintasoftware/django-react-boilerplate](https://github.com/vintasoftware/django-react-boilerplate)) | 1 BLOCK (down from 11 in v0.1.0 - Python `from X import Y` no longer matched as SQL `FROM`). Schema layer silent (Django models.py not parsed - see roadmap). |
+
 ## Limitations (honest list)
 
-`phantomlint` is regex + set-arithmetic. That keeps it fast and dependency-free, but it pays for it in specific stacks:
-
-- **ORM-heavy stacks (Prisma / Drizzle / Sequelize / TypeORM):** queries are generated, not visible as raw SQL strings. Run with `--update-baseline` first to accept the generated noise, then only *new* drift surfaces. Native ORM model parsing is on the roadmap.
-- **GraphQL:** not supported in v0.1. The 3-layer model (fetch -> route -> SQL) doesn't map cleanly to a GraphQL schema. Track [issue #1](https://github.com/GolemLabs-ai/phantomlint/issues) for progress.
-- **Microservices / split repos:** `phantomlint` reads one repo at a time. Frontend in repo A calling backend in repo B requires running it on both with shared route conventions (or pinning OpenAPI specs, which a separate tool can do better).
-- **Dynamic SQL (string concatenation, query builders):** false positives possible. `phantom column` defaults to WARN precisely because of this - tune `broad_prefixes` and use baselines.
+- **ORM schema parsing (Prisma / Drizzle / Sequelize / TypeORM / Django models):** the schema layer doesn't read `schema.prisma`, `models.py`, or TypeScript decorators. Tables are still queried correctly through `--update-baseline` for raw SQL parts, but the phantom-column check is silent on ORM-modeled tables. Native parsers are on the v0.2 roadmap.
+- **GraphQL:** not supported. The 3-layer model (fetch → route → SQL) doesn't map cleanly to one GraphQL schema. v0.2 candidate.
+- **Microservices / split repos:** `phantomlint` reads one repo at a time. Cross-repo frontend ↔ backend needs each side scanned separately (or pinned OpenAPI specs, which a separate tool can do better).
+- **Dynamic SQL (string concatenation, query builders):** false positives possible. `phantom column` defaults to WARN precisely for this - tune `broad_prefixes` and use baselines.
 - **NoSQL (Mongo, DynamoDB, Firestore):** no schema layer to diff against. Out of scope.
 
-When `phantomlint` fits: hand-rolled JS/TS routing + raw SQL migrations + standard `fetch()`/`axios`. Worst case for any stack: run with `--update-baseline`, get the gate working on *new* drift, file an issue with a sample for better support.
+Worst case for any stack: run `--update-baseline` once, get the gate working on *new* drift, file an issue with a sample for better support. PRs welcome.
 
 ## What it is NOT
 
