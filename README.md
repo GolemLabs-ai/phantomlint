@@ -41,6 +41,7 @@ Phantom table/column suggestions use fuzzy matching (`payments` -> "did you mean
 ## Install
 
 ```bash
+pipx run phantomlint --demo      # zero-install: try the bundled sample in one command
 pip install phantomlint          # or: uv tool install phantomlint
 ```
 
@@ -122,12 +123,57 @@ phantomlint -c phantomlint.json --update-baseline   # writes phantomlint.baselin
 
 Commit the baseline. From then on, accepted findings are listed but don't fail the build.
 
-## CI example
+## Use in CI
+
+### GitHub Actions
+
+Drop this into `.github/workflows/phantomlint.yml`:
 
 ```yaml
-- run: pip install phantomlint
-- run: phantomlint -c phantomlint.json   # exits 1 on any new BLOCK finding
+name: phantomlint
+on: [push, pull_request]
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install phantomlint
+      - run: phantomlint -c phantomlint.json
 ```
+
+Exit code `1` blocks the merge on any new BLOCK finding. Add `--strict` to block on WARN too.
+
+### pre-commit hook
+
+Add to `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: phantomlint
+        name: phantomlint (frontend/API/schema drift)
+        entry: phantomlint -c phantomlint.json
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+```
+
+Catches phantom features before they get committed, not after they ship.
+
+## Limitations (honest list)
+
+`phantomlint` is regex + set-arithmetic. That keeps it fast and dependency-free, but it pays for it in specific stacks:
+
+- **ORM-heavy stacks (Prisma / Drizzle / Sequelize / TypeORM):** queries are generated, not visible as raw SQL strings. Run with `--update-baseline` first to accept the generated noise, then only *new* drift surfaces. Native ORM model parsing is on the roadmap.
+- **GraphQL:** not supported in v0.1. The 3-layer model (fetch -> route -> SQL) doesn't map cleanly to a GraphQL schema. Track [issue #1](https://github.com/GolemLabs-ai/phantomlint/issues) for progress.
+- **Microservices / split repos:** `phantomlint` reads one repo at a time. Frontend in repo A calling backend in repo B requires running it on both with shared route conventions (or pinning OpenAPI specs, which a separate tool can do better).
+- **Dynamic SQL (string concatenation, query builders):** false positives possible. `phantom column` defaults to WARN precisely because of this - tune `broad_prefixes` and use baselines.
+- **NoSQL (Mongo, DynamoDB, Firestore):** no schema layer to diff against. Out of scope.
+
+When `phantomlint` fits: hand-rolled JS/TS routing + raw SQL migrations + standard `fetch()`/`axios`. Worst case for any stack: run with `--update-baseline`, get the gate working on *new* drift, file an issue with a sample for better support.
 
 ## What it is NOT
 
