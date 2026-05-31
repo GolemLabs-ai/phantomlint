@@ -1,0 +1,10 @@
+{
+  "name": "sample-shop",
+  "root": "sample",
+  "frontend": { "globs": ["frontend/**/*.jsx"] },
+  "api":      { "globs": ["api/**/*.js"] },
+  "schema":   { "globs": ["schema/**/*.sql"] },
+  "options": {
+    "broad_prefixes": ["/api"]
+  }
+}
