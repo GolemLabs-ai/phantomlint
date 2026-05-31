@@ -1,12 +1,14 @@
 # phantomlint
 
-**A static linter that catches phantom features before they ship.**
+**The reality check for AI-coded apps.** Vibe coding ships UI faster than the backend that feeds it - `phantomlint` catches the drift between what your UI promises and what your backend can deliver.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 
-Your UI calls an endpoint the backend never serves. Your backend queries a column the schema never defines. It looks done in the UI, returns empty or 404 at runtime, and nobody notices until a user does. AI-assisted coding ships UI faster than the backend that feeds it, so this kind of frontend/API/schema drift is everywhere - and type checkers and tests miss it.
+Every web app is haunted. Some endpoints get called but never served. Some queries hit tables that don't exist. Some columns are written and never defined. You can't see them with type checkers or unit tests - they're alive only at runtime, in production, on someone else's screen.
+
+**`phantomlint` exorcises them.** Static. Deterministic. 4 checks. MIT.
 
 `phantomlint` cross-checks the three layers of a typical web app contract and tells you, in seconds, where they disagree:
 
