@@ -203,6 +203,127 @@ def test_regex_to_skeleton_nested_groups():
     assert ")" not in skel, skel
 
 
+# --- Bug #1: import lines must NOT leak into the SQL FROM extractor -----------
+def test_bug1_python_import_not_sql_from():
+    """`from django.contrib import auth` / `import X from "next"` must NOT be
+    parsed as SQL `FROM ...` and turn into a phantom_table finding.
+
+    Regression for Bug #1: extract_table_refs scanned raw text with the
+    `\\bFROM` regex, so Python/TS import declarations produced false positives
+    like `phantom_table: contrib` and `phantom_table: "next"`.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "schema").mkdir()
+        (d / "api").mkdir()
+        (d / "schema" / "s.sql").write_text(
+            "CREATE TABLE users (id INT, email TEXT);", encoding="utf-8"
+        )
+        # Mix of Python-style + TS/JS ES-module imports + a Prisma-ish `from`.
+        # The lone real SQL on the last line (`FROM users`) is what should be
+        # extracted; everything else must be silently ignored.
+        (d / "api" / "handler.ts").write_text(
+            "from django.contrib import auth\n"
+            "from rest_framework.decorators import api_view\n"
+            'import X from "next";\n'
+            'import { prisma } from "@prisma/client";\n'
+            'import * as ns from "react";\n'
+            'export { foo } from "./bar";\n'
+            'import "side-effect-only";\n'
+            'db.exec("SELECT id FROM users WHERE id = 1");\n',
+            encoding="utf-8",
+        )
+        cfg = {
+            "schema": {"globs": ["schema/**/*.sql"]},
+            "api": {"globs": ["api/**/*.ts"]},
+        }
+        res = core.run(cfg, d)
+        phantoms = {f["id"] for f in res["findings"] if f["kind"] == "phantom_table"}
+        # Tokens that USED to leak from import declarations:
+        for bad in (
+            "contrib", "rest_framework", "decorators", "next",
+            "@prisma/client", "react", "./bar", "side-effect-only", "client",
+        ):
+            assert bad not in phantoms, (
+                f"import-line leak: '{bad}' surfaced as phantom_table; "
+                f"all phantoms={phantoms}"
+            )
+        # And the legitimate `FROM users` must still resolve cleanly (no phantom).
+        assert "users" not in phantoms, (
+            f"`users` wrongly flagged despite schema CREATE TABLE; phantoms={phantoms}"
+        )
+
+
+# --- Bug #2: Express router endpoints must be extracted -----------------------
+def test_bug2_express_router_endpoints():
+    """router.get('/x') / app.post('/y') / router.use('/z') must register as
+    served routes so frontend fetches to those paths are NOT phantom_endpoints.
+
+    Regression for Bug #2: extract_routes recognised only `path === '/x'`,
+    `startsWith('/x')`, and `path.match(/regex/)`. Standard Express idioms
+    returned zero routes, producing false-positive phantom_endpoint findings.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "frontend").mkdir()
+        (d / "api").mkdir()
+        (d / "schema").mkdir()
+        (d / "schema" / "s.sql").write_text(
+            "CREATE TABLE users (id INT);", encoding="utf-8"
+        )
+        (d / "frontend" / "app.jsx").write_text(
+            'fetch("/api/users");\n'
+            'fetch("/api/orders");\n'
+            'fetch("/api/orders/123");\n'      # served by :id param route
+            'fetch("/api/admin/dashboard");\n'  # served by router.use prefix mount
+            'fetch("/api/legacy");\n',          # genuinely not served -> phantom
+            encoding="utf-8",
+        )
+        (d / "api" / "routes.js").write_text(
+            "const router = express.Router();\n"
+            "router.get('/api/users', listUsers);\n"
+            'router.post("/api/orders", createOrder);\n'
+            "router.put(`/api/orders/:id`, updateOrder);\n"
+            "router.delete('/api/orders/:id', deleteOrder);\n"
+            "app.patch('/api/users/:id', patchUser);\n"
+            "router.use('/api/admin', adminRouter);\n"
+            "module.exports = router;\n",
+            encoding="utf-8",
+        )
+        cfg = {
+            "frontend": {"globs": ["frontend/**/*.jsx"]},
+            "api": {"globs": ["api/**/*.js"]},
+            "schema": {"globs": ["schema/**/*.sql"]},
+            # No broad_prefixes drop: we want `/api/...` routes to count.
+            "options": {"broad_prefixes": []},
+        }
+        res = core.run(cfg, d)
+        routes_count = res["stats"]["routes"]
+        # 6 declared routes; /api/orders/:id appears twice (PUT+DELETE) but the
+        # path is the same -> 5 unique paths registered.
+        assert routes_count >= 5, (
+            f"Express router extraction failed: expected >=5 routes, got "
+            f"{routes_count}; stats={res['stats']}"
+        )
+        phantom_eps = {
+            f["id"] for f in res["findings"] if f["kind"] == "phantom_endpoint"
+        }
+        # These must NOT be phantom (Express router serves them):
+        for served in (
+            "/api/users", "/api/orders", "/api/orders/:param",
+            "/api/admin/dashboard",
+        ):
+            assert served not in phantom_eps, (
+                f"Express-served endpoint '{served}' wrongly flagged as phantom; "
+                f"all phantoms={phantom_eps}"
+            )
+        # And the genuinely-unserved one is still caught (sanity: extraction
+        # didn't accidentally swallow EVERY fetch as served):
+        assert "/api/legacy" in phantom_eps, (
+            f"legitimately phantom '/api/legacy' was lost; phantoms={phantom_eps}"
+        )
+
+
 # --- path safety --------------------------------------------------------------
 def test_path_traversal_rejected():
     with tempfile.TemporaryDirectory() as td:

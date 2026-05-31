@@ -27,6 +27,14 @@ DEFAULTS = {
         "route_exact": [r"""(?:path|pathname)\s*===?\s*[`'"](/[^`'"]+)"""],
         "route_prefix": [r"""startsWith\(\s*[`'"](/[^`'"]+)"""],
         "route_regex": [r"""\.match\(\s*/((?:\\.|[^/\\])*)/[gimsuy]*\s*\)"""],
+        # Express/Connect-style router: router.get('/path', ...) / app.post('/path', ...) /
+        # router.use('/path', ...). Captures the literal string path; method is method-set
+        # constrained to avoid matching unrelated calls like router.handle() / app.listen().
+        "route_express_method": [
+            r"""(?:^|[^.\w])(?:router|app)\s*\.\s*"""
+            r"""(?:get|post|put|patch|delete|options|head|all|use)\s*\(\s*"""
+            r"""[`'"](/[^`'"]+)"""
+        ],
         "table_ref": [r"""\b(?:FROM|INTO|UPDATE|JOIN|REFERENCES)\s+(""" + _QUALIFIED + r""")"""],
         "insert_cols": [
             r"""INSERT\s+INTO\s+(""" + _QUALIFIED + r""")\s*\(([^;]*?)\)\s*VALUES"""
@@ -174,6 +182,46 @@ def _strip_js_comments(txt):
         out.append(ch)
         i += 1
     return "".join(out)
+
+
+# --- import-statement filter (Bug #1 guard) ---------------------------------
+# Lines that START a Python `from X import Y` / `import X` declaration, or a
+# JS/TS ES-module `import ... from "X"` declaration, must NOT be scanned for
+# SQL table_ref patterns. Otherwise `from django.contrib import auth` would
+# look like SQL `FROM django.contrib` and `import X from "next"` would look
+# like SQL `FROM "next"`, both producing phantom-table false positives.
+_PY_IMPORT_LINE = re.compile(r"""^\s*(?:from|import)\s+\S""")
+# JS/TS: import default/named/namespace bindings from a quoted module specifier.
+# Matches: import X from "y"  /  import {a,b} from 'y'  /  import * as x from "y"  /
+# import "side-effect"  /  export {a} from "y"  /  export * from "y".
+_JS_IMPORT_LINE = re.compile(
+    r"""^\s*(?:import|export)\b[^;]*?\bfrom\s*[`'"][^`'"]+[`'"]"""
+)
+# Bare side-effect import: `import "module"` / `import 'module'`.
+_JS_BARE_IMPORT_LINE = re.compile(r"""^\s*import\s*[`'"][^`'"]+[`'"]""")
+
+
+def _strip_import_lines(txt):
+    """Return `txt` with every line that is (or starts) a Python/TS/JS import
+    declaration replaced by an empty line. Preserves line count so any later
+    line-anchored regex still reports faithful positions. This is a coarse but
+    safe filter: SQL prose that genuinely begins with the word `from` (rare in
+    well-formed SQL files; comments use `--`) is the only legitimate loss."""
+    out_lines = []
+    for line in txt.splitlines(keepends=True):
+        # Strip trailing newline for the predicate, keep it on the original line.
+        probe = line.rstrip("\r\n")
+        if (
+            _PY_IMPORT_LINE.match(probe)
+            or _JS_IMPORT_LINE.match(probe)
+            or _JS_BARE_IMPORT_LINE.match(probe)
+        ):
+            # Replace with blank line of same line-ending so offsets line up.
+            tail = line[len(probe):]
+            out_lines.append(tail if tail else "\n")
+        else:
+            out_lines.append(line)
+    return "".join(out_lines)
 
 
 # --- ReDoS guard: wall-clock timeout around finditer ------------------------
@@ -486,6 +534,12 @@ def extract_routes(root, cfg):
     ex = _compile(_merged(cfg, "api", "route_exact"))
     pre = _compile(_merged(cfg, "api", "route_prefix"))
     rgx = _compile(_merged(cfg, "api", "route_regex"))
+    # Express/Connect method routes are matched per-line with MULTILINE so the
+    # leading `(?:^|[^.\w])` anchor reliably excludes `myRouter.get(...)` calls
+    # while still allowing `router.get(...)` / `app.get(...)` at line start.
+    exp = _compile(
+        _merged(cfg, "api", "route_express_method"), re.MULTILINE
+    )
     globs = cfg.get("api", {}).get("globs", [])
     ignore = _opt(cfg, "ignore")
     max_bytes = _opt(cfg, "max_file_bytes")
@@ -511,6 +565,15 @@ def extract_routes(root, cfg):
                 skel = regex_to_skeleton(src).rstrip("/")
                 if skel:
                     add(skel, "exact" if src.rstrip().endswith("$") else "prefix")
+        # Express/Connect: router.METHOD(path, ...) / app.METHOD(path, ...).
+        # router.use(path, ...) acts as a prefix mount; everything else (get/
+        # post/put/patch/delete/options/head/all) is an exact endpoint. Path
+        # placeholders (`:id`) are normalised downstream by endpoint_served.
+        for rx in exp:
+            for m in _safe_finditer(rx, txt, timeout):
+                path = m.group(1)
+                kind = "prefix" if ".use(" in m.group(0).replace(" ", "") else "exact"
+                add(path, kind)
     return routes
 
 
@@ -523,7 +586,10 @@ def extract_table_refs(root, cfg):
     timeout = _opt(cfg, "regex_timeout_seconds")
     refs = {}
     for f in iter_files(root, globs, ignore, max_bytes):
-        txt = _strip_js_comments(_read(f))
+        # _strip_import_lines blanks out Python/TS/JS import declarations BEFORE
+        # comment stripping so a phrase like `from "next"` inside an import never
+        # reaches the SQL `FROM` regex (Bug #1 root cause).
+        txt = _strip_js_comments(_strip_import_lines(_read(f)))
         for rx in pats:
             for m in _safe_finditer(rx, txt, timeout):
                 t = _last_segment(m.group(1))
@@ -544,7 +610,9 @@ def extract_insert_columns(root, cfg):
     timeout = _opt(cfg, "regex_timeout_seconds")
     cols = {}
     for f in iter_files(root, globs, ignore, max_bytes):
-        txt = _strip_js_comments(_read(f))
+        # Same import-line guard as extract_table_refs: keeps `INSERT INTO` patterns
+        # honest if a future config ever extends insert_cols to looser anchors.
+        txt = _strip_js_comments(_strip_import_lines(_read(f)))
         for rx in pats:
             for m in _safe_finditer(rx, txt, timeout):
                 t = _last_segment(m.group(1))
